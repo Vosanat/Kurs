@@ -2,6 +2,7 @@ import socket
 import hashlib
 import random
 import uuid
+import argparse
 
 def generate_client_id():
     # Генерация случайного clientID длиной от 1 до 24 символов
@@ -17,15 +18,20 @@ def print_help():
     """
     help_text = """
     Доступные команды:
-    - DELETE <имя_файла>: Удалить указанный файл.
+    - DELETE <имя_файла>: Удалить указанный файл для обычного пользователя.
+             admin/<имя_файла> для админа
     - EXIT: Завершить сессию и отключиться от сервера.
     - HELP: Показать эту справку.
     """
     print(help_text)
 
-def connect_to_server():
+def connect_to_server(host, port=12345):
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client_socket.connect(('localhost', 12345))
+    try:
+        client_socket.connect((host, port))
+    except Exception as e:
+        print(f"Ошибка подключения к серверу {host}:{port}: {str(e)}")
+        return
 
     try:
         # Генерация clientID, messageID и clientType
@@ -97,4 +103,11 @@ def connect_to_server():
         client_socket.close()
 
 if __name__ == "__main__":
-    connect_to_server()
+    # Настройка парсера аргументов командной строки
+    parser = argparse.ArgumentParser(description='Клиент для подключения к серверу')
+    parser.add_argument('--host', required=True, help='Адрес сервера для подключения')
+    parser.add_argument('--port', type=int, default=12345, help='Порт сервера (по умолчанию: 12345)')
+    
+    args = parser.parse_args()
+    
+    connect_to_server(host=args.host, port=args.port)
