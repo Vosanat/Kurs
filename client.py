@@ -3,26 +3,51 @@ import hashlib
 import random
 import uuid
 import argparse
+import json
 
 def generate_client_id():
-    # Генерация случайного clientID длиной от 1 до 24 символов
     return str(uuid.uuid4())[:24]
 
 def generate_message_id():
-    # Генерация случайного messageID от 1 до 32
     return random.randint(1, 32)
 
-def print_help():
-    """
-    Выводит справку по доступным командам.
-    """
+def create_message_header(client_id, message_id, client_type):
+    return {
+        "clientID": client_id,
+        "messageID": message_id,
+        "clientType": client_type
+    }
+
+def send_message(sock, header, body=""):
+    message = json.dumps(header) + "\n\n" + body
+    sock.sendall(message.encode('utf-8'))
+
+def receive_message(sock):
+    data = sock.recv(4096).decode('utf-8')
+    if not data:
+        return None, None
+    
+    header_str, _, body = data.partition('\n\n')
+    try:
+        header = json.loads(header_str)
+    except json.JSONDecodeError:
+        return None, None
+    
+    return header, body.strip()
+
+def print_help(is_admin=False):
     help_text = """
     Доступные команды:
-    - DELETE <имя_файла>: Удалить указанный файл для обычного пользователя.
-             admin/<имя_файла> для админа
-    - EXIT: Завершить сессию и отключиться от сервера.
-    - HELP: Показать эту справку.
+    - delete "имя_файла" - удалить файл
+        файлы пользователя:
+            file1.txt
+            file2.txt
+            file3.txt
+    - exit - завершить сеанс
+    - help - показать справку
     """
+    if is_admin:
+        help_text += "\nАдминистратор может использовать: delete \"пользователь\"/\"имя_файла\""
     print(help_text)
 
 def connect_to_server(host, port=12345):
@@ -30,84 +55,85 @@ def connect_to_server(host, port=12345):
     try:
         client_socket.connect((host, port))
     except Exception as e:
-        print(f"Ошибка подключения к серверу {host}:{port}: {str(e)}")
+        print(f"Ошибка подключения: {str(e)}")
         return
 
     try:
-        # Генерация clientID, messageID и clientType
         client_id = generate_client_id()
         message_id = generate_message_id()
-        client_type = 1  # Предположим, что клиент использует версию 1
+        client_type = 1
 
-        # Вводим логин
+        header = create_message_header(client_id, message_id, client_type)
         username = input("Введите логин: ")
-        
-        # Формируем заголовок и логин в одном пакете
-        header = f"connection: clientID: {client_id}, messageID: {message_id}, clientType: {client_type}\n"
-        data = header + username
-        client_socket.send(data.encode('utf-8'))
+        send_message(client_socket, header, username)
 
-        # Получаем соль от сервера
-        salt = client_socket.recv(1024).decode('utf-8')
-        print(f"Получена соль от сервера: {salt}")
+        header, salt = receive_message(client_socket)
+        if not header or not salt:
+            print("Ошибка: некорректный ответ сервера")
+            return
 
-        # Подтверждаем получение соли
-        client_socket.send("SALT_RECEIVED".encode('utf-8'))
+        print(f"Получена соль: {salt}")
+        send_message(client_socket, header, "SALT_RECEIVED")
 
-        # Вводим пароль
         password = input("Введите пароль: ")
-
-        # Хэшируем пароль с солью
         hashed_password = hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
+        send_message(client_socket, header, hashed_password)
 
-        # Отправляем хэшированный пароль на сервер
-        client_socket.send(hashed_password.encode('utf-8'))
-
-        # Получаем ответ от сервера
-        auth_response = client_socket.recv(1024).decode('utf-8')
-        print(f"Ответ сервера: {auth_response}")
-
-        if auth_response != "AUTH_SUCCESS":
+        header, auth_response = receive_message(client_socket)
+        if auth_response != "auth_success":
             print("Ошибка аутентификации")
             return
 
-        print("Аутентификация прошла успешно.")
+        print("Аутентификация успешна")
+        is_admin = "admin" in username.lower()
 
         while True:
-            command = input("Введите команду (или HELP для справки): ").strip()
-            if command.upper() == "EXIT":
-                client_socket.send("EXIT".encode('utf-8'))
+            command = input("Введите команду (help для справки): ").strip().lower()
+            if not command:
+                continue
+
+            if command == "exit":
+                send_message(client_socket, header, "exit")
                 print("Завершение сессии...")
                 break
-            elif command.upper() == "HELP":
-                print_help()
-            elif command.startswith("DELETE"):
-                # Отправляем команду DELETE с указанием имени файла
-                header = f"connection: clientID: {client_id}, messageID: {message_id}, clientType: {client_type}\n"
-                data = header + command
-                client_socket.send(data.encode('utf-8'))
-                response = client_socket.recv(1024).decode('utf-8')
-                print(response)
+            elif command == "help":
+                print_help(is_admin)
+            elif command.startswith("delete"):
+                parts = command.split(maxsplit=1)
+                if len(parts) < 2:
+                    print("Ошибка: укажите имя файла")
+                    continue
+                
+                filename_part = parts[1]
+                if not (filename_part.startswith('"') and filename_part.endswith('"')):
+                    print('Ошибка: имя файла должно быть в кавычках, например: delete "file1.txt"')
+                    continue
+                
+                message_id = generate_message_id()
+                header = create_message_header(client_id, message_id, client_type)
+                send_message(client_socket, header, command)
+                
+                response_header, response = receive_message(client_socket)
+                if response:
+                    print(response)
             else:
-                header = f"connection: clientID: {client_id}, messageID: {message_id}, clientType: {client_type}\n"
-                data = header + command
-                client_socket.send(data.encode('utf-8'))
-                response = client_socket.recv(1024).decode('utf-8')
-                print(response)
+                message_id = generate_message_id()
+                header = create_message_header(client_id, message_id, client_type)
+                send_message(client_socket, header, command)
+                response_header, response = receive_message(client_socket)
+                if response:
+                    print(response)
 
     except KeyboardInterrupt:
-        print("\nЗавершение работы клиента...")
+        print("\nЗавершение работы...")
     except Exception as e:
-        print(f"Ошибка при работе с сервером: {str(e)}")
+        print(f"Ошибка: {str(e)}")
     finally:
         client_socket.close()
 
 if __name__ == "__main__":
-    # Настройка парсера аргументов командной строки
     parser = argparse.ArgumentParser(description='Клиент для подключения к серверу')
-    parser.add_argument('--host', required=True, help='Адрес сервера для подключения')
-    parser.add_argument('--port', type=int, default=12345, help='Порт сервера (по умолчанию: 12345)')
-    
+    parser.add_argument('--host', required=True, help='Адрес сервера')
+    parser.add_argument('--port', type=int, default=12345, help='Порт сервера')
     args = parser.parse_args()
-    
     connect_to_server(host=args.host, port=args.port)
